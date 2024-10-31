@@ -3,8 +3,8 @@
 const std = @import("std");
 
 pub const arena = struct {
-    const ARENA_SIZE = 4096;
-    var _arena: [ARENA_SIZE]bool = .{false} ** ARENA_SIZE;
+    const _SIZE = 4096;
+    var _arena: [_SIZE]bool = .{false} ** _SIZE;
     var _index: usize = 0;
     var _alloc: ?std.heap.ArenaAllocator = null;
 
@@ -14,7 +14,7 @@ pub const arena = struct {
             return changed;
         }
 
-        if (_index >= ARENA_SIZE)
+        if (_index >= _SIZE)
             @panic("exceeded max stack allocation, consider adding an allocator with `arena.alloc`");
 
         const changed = &_arena[_index];
@@ -41,15 +41,8 @@ pub const Observer = struct {
     }
 };
 
-/// The base implementation
+/// A container that holds a reactive value.
 pub fn Variable(comptime T: type) type {
-    // A container that holds a reactive value.
-    //
-    // Args:
-    //     value: The initial value of the signal, which can be a nested structure.
-    //
-    //     Attributes:
-    //         _value (NestedValue[T]): The current value of the signal.
     return struct {
         const Self = @This();
         const OBSERVER_BUFFER_SIZE = 4;
@@ -74,13 +67,17 @@ pub fn Variable(comptime T: type) type {
 
             if (change) {
                 self._value = new;
-                self.update();
+                self.notify();
             }
         }
 
         /// Notify all observers by calling their update method.
-        pub fn update(self: *Self) void {
+        pub fn notify(self: *Self) void {
             for (self._observers[0..self._obCurSize]) |ob| ob.update();
+        }
+
+        pub inline fn ref(self: *Self) *Variable(T) {
+            return self;
         }
 
         /// Subscribe an observer to this variable.
@@ -111,15 +108,6 @@ pub fn Variable(comptime T: type) type {
                 }
             }
         }
-    };
-}
-
-fn Emiter(comptime T: type) type {
-    return struct {
-        dataptr: *anyopaque,
-        valuefn: *const fn (*anyopaque) *T,
-        subscribefn: *const fn (*anyopaque, Observer) void,
-        unsubscribefn: *const fn (*anyopaque, Observer) void,
     };
 }
 
@@ -157,50 +145,53 @@ pub fn Computed(comptime function: anytype) type {
                 .args = args,
                 .changed = arena.next(),
             };
-            self.update(); // this value `self.inner._value` defined
+            self.update(); // after this value `self.inner._value` defined
 
             // observe our dependencies
             inline for (args) |arg| {
-                comptime var Ty: type = @TypeOf(arg);
-                if (@typeInfo(Ty) == .Pointer) {
-                    Ty = @typeInfo(Ty).Pointer.child;
-                } else continue;
-
-                if (std.meta.hasFn(Ty, "subscribe")) {
-                    arg.subscribe(self.observer());
-                }
+                const Ty: type = typeOfVariable(@TypeOf(arg));
+                const varg: *Variable(Ty) = arg;
+                varg.subscribe(self.observer());
             }
+
             return self;
         }
 
         fn update(self: *Self) void {
             var pargs: FnArgs = undefined;
             inline for (self.args, 0..) |arg, i| {
-                const Ty = @TypeOf(arg);
-                if (@typeInfo(Ty) == .Pointer) {
-                    const Temp = @typeInfo(Ty).Pointer.child;
-                    if (std.meta.hasFn(Temp, "value")) {
-                        pargs[i] = arg.value();
-                        continue;
-                    }
-                }
-                pargs[i] = arg;
+                const Ty = typeOfVariable(@TypeOf(arg));
+                const varg: *Variable(Ty) = arg;
+                pargs[i] = varg.value();
             }
 
-            const val = self.f(pargs);
+            const val: T = self.f(pargs);
             self.inner.setvalue(val);
+        }
+
+        fn typeOfVariable(Ty: type) type {
+            const ERROR = "Function arguments must be `*Variable(...)`, you can call `.ref()` on most varibales to get the right thing.";
+            if (@typeInfo(Ty) != .Pointer) @compileError(ERROR);
+            const Child = @typeInfo(Ty).Pointer.child;
+
+            if (@typeInfo(Child) != .Struct) @compileError(ERROR);
+            const fields = @typeInfo(Child).Struct.fields;
+
+            const Type: type = inline for (fields) |field| {
+                if (comptime std.mem.eql(u8, field.name, "_value")) {
+                    break field.type;
+                }
+            } else @compileError(ERROR);
+
+            return Type; // autofix
         }
 
         pub fn observer(self: Self) Observer {
             return Observer{ .changed = self.changed };
         }
 
-        pub inline fn subscribe(self: *Self, ob: Observer) void {
-            self.inner.subscribe(ob);
-        }
-
-        pub inline fn unsubscribe(self: *Self, ob: Observer) void {
-            self.inner.unsubscribe(ob);
+        pub inline fn ref(self: *Self) *Variable(T) {
+            return &self.inner;
         }
 
         /// Get the current value.
